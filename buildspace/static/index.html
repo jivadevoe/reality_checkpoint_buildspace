@@ -1,0 +1,185 @@
+<!doctype html>
+<!-- Copyright 2026 Reality Checkpoint
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Buildspace</title>
+  <meta name="author" content="Reality Checkpoint">
+  <meta name="copyright" content="Copyright 2026 Reality Checkpoint. Apache License 2.0.">
+  <meta name="description" content="Buildspace: a show-and-tell surface for coding agents, by Reality Checkpoint.">
+
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0e1116">
+  <meta name="color-scheme" content="dark">
+
+  <!-- iOS home-screen app -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Buildspace">
+  <link rel="apple-touch-icon" href="/static/icons/icon-180.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/static/icons/icon-512.png">
+
+  <link rel="stylesheet" href="/static/app.css">
+  <!-- Third-party libraries are pinned by version AND by Subresource Integrity
+       hash: if the CDN ever serves different bytes, the browser refuses them.
+       When bumping a version, recompute with:
+         curl -sL URL | openssl dgst -sha384 -binary | openssl base64 -A -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.10.0/styles/atom-one-dark.min.css" integrity="sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.10.0/highlight.min.js" integrity="sha384-GdEWAbCjn+ghjX0gLx7/N1hyTVmPAjdC2OvoAA0RyNcAOhqwtT8qnbCxWle2+uJX" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js" integrity="sha384-yxKDWWf0wwdUj/gPeuL11czrnKFQROnLgY8ll7En9NYoXibgg3C6NK/UDHNtUgWJ" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.15/dist/purify.min.js" integrity="sha384-uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js" integrity="sha384-WmdflGW9aGfoBdHc4rRyWzYuAjEmDwMdGdiPNacbwfGKxBW/SO6guzuQ76qjnSlr" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/panzoom@9.4.3/dist/panzoom.min.js" integrity="sha384-gCKiYBB8ghbILen/HnqXIWjiFubgTFgtZRboRERlfYdnifxCeOhc9nfw9j4gO8eG" crossorigin="anonymous"></script>
+  <script>
+    if (window.mermaid) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        themeVariables: {
+          darkMode: true,
+          background: "#0e1116",
+          primaryColor: "#1b2030",
+          primaryTextColor: "#d7dbe3",
+          primaryBorderColor: "#555e74",
+          lineColor: "#4a5270",
+          secondaryColor: "#2a2e38",
+          tertiaryColor: "#141821",
+          fontFamily: "Inter, system-ui, sans-serif",
+        },
+        sequence: { actorMargin: 60, messageMargin: 44, mirrorActors: false },
+        flowchart: { curve: "basis" },
+      });
+    }
+  </script>
+</head>
+<body>
+  <div id="app" class="layout">
+    <header class="topbar">
+      <button id="sidebar-toggle" class="icon-btn" aria-label="toggle sidebar">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-name">Buildspace</span>
+        <span class="brand-sep" aria-hidden="true"></span>
+        <a class="brand-maker" href="https://realitycheckpoint.org" target="_blank" rel="noopener">Reality <span>Checkpoint</span></a>
+      </div>
+      <nav class="tabs" id="tabs">
+        <button data-tab="code" class="tab active">Code</button>
+        <button data-tab="diff" class="tab">Diff</button>
+        <button data-tab="graph" class="tab">Diagrams</button>
+        <button data-tab="note" class="tab">Notes</button>
+        <button data-tab="video" class="tab">Video</button>
+      </nav>
+      <div class="spacer"></div>
+      <label class="follow" title="When on, your view follows each new push. Navigating in the sidebar turns this off automatically.">
+        <input type="checkbox" id="autofollow" checked>
+        <span>auto-follow</span>
+      </label>
+      <span id="conn-dot" class="conn-dot" title="connection"></span>
+    </header>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span>Timeline</span>
+        <button id="clear-btn" class="link-btn" title="clear all entries">clear all</button>
+      </div>
+      <ol id="timeline" class="timeline"></ol>
+      <footer class="rc-footer">
+        <div class="rc-wordmark">Reality <span>Checkpoint</span></div>
+        <div class="rc-copyright">&copy; 2026 Reality Checkpoint</div>
+        <div class="rc-license">Open source under the <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache License 2.0</a></div>
+      </footer>
+    </aside>
+
+    <main class="main">
+      <section class="pane pane-code" id="pane-code">
+        <div class="empty-state" id="code-empty">
+          <h2>Nothing yet</h2>
+          <p>Buildspace is running. Code and diffs your agent pushes here will appear in this pane.</p>
+          <code>python -m buildspace.cli code ./some/file.py -H 10-15 -a "12:look here"</code>
+        </div>
+        <div class="code-view" id="code-view" hidden>
+          <div class="code-head">
+            <div class="code-title" id="code-title"></div>
+            <div class="code-meta" id="code-meta"></div>
+          </div>
+          <div class="code-body" id="code-body"></div>
+        </div>
+      </section>
+      <section class="pane pane-diff" id="pane-diff" hidden>
+        <div class="empty-state" id="diff-empty">
+          <h2>No diffs yet</h2>
+          <p>Diffs appear here when your agent walks you through a change.</p>
+        </div>
+        <div class="code-view" id="diff-view" hidden>
+          <div class="code-head">
+            <div class="code-title" id="diff-title"></div>
+            <div class="code-meta" id="diff-meta"></div>
+          </div>
+          <div class="code-body" id="diff-body"></div>
+        </div>
+      </section>
+      <section class="pane pane-graph" id="pane-graph" hidden>
+        <div class="empty-state" id="graph-empty">
+          <h2>No diagrams yet</h2>
+          <p>Force-directed relationship graphs and UML (sequence, class, state, flowchart) live here.</p>
+        </div>
+        <div class="graph-view" id="graph-view" hidden>
+          <div class="code-head">
+            <div class="code-title" id="graph-title"></div>
+            <div class="code-meta" id="graph-meta"></div>
+          </div>
+          <div class="graph-canvas" id="graph-canvas"></div>
+        </div>
+      </section>
+      <section class="pane pane-note" id="pane-note" hidden>
+        <div class="empty-state" id="note-empty">
+          <h2>No notes yet</h2>
+          <p>Prose explanations, walkthroughs, and rich-text notes appear here.</p>
+        </div>
+        <div class="note-view" id="note-view" hidden>
+          <div class="code-head">
+            <div class="code-title" id="note-title"></div>
+            <div class="code-meta" id="note-meta"></div>
+          </div>
+          <article class="note-body" id="note-body"></article>
+        </div>
+      </section>
+      <section class="pane pane-video" id="pane-video" hidden>
+        <div class="empty-state" id="video-empty">
+          <h2>No videos yet</h2>
+          <p>Rough cuts and render previews appear here. <code>buildspace.video(path)</code> from Python, or <code>POST /api/video</code> from any tool.</p>
+        </div>
+        <div class="video-view" id="video-view" hidden>
+          <div class="code-head video-head">
+            <div class="video-head-main">
+              <div class="code-title" id="video-title"></div>
+              <div class="code-meta" id="video-meta"></div>
+            </div>
+            <button id="video-notes-toggle" class="video-notes-toggle" type="button" hidden
+                    aria-expanded="false" title="Show notes / alerts">notes</button>
+          </div>
+          <div class="video-body">
+            <video id="video-player" controls preload="metadata" playsinline></video>
+          </div>
+          <article class="video-notes" id="video-notes" hidden></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

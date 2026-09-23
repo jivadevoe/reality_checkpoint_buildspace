@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Virtual env
+venv/
+.venv/
+
+# Logs (written by launchd)
+buildspace.log
+buildspace.err.log
+
+# Runtime DB — user data, never commit
+# (lives at ~/.buildspace/buildspace.db by default, but guard anyway)
+*.sqlite
+*.db
+*.db-journal
+
+# The static dir doubles as a drop box for images referenced from notes
+# (see README "Embedding images"). Only the app shell is source; everything
+# else that lands here is user content and must never be committed.
+buildspace/static/*
+!buildspace/static/app.css
+!buildspace/static/app.js
+!buildspace/static/index.html
+!buildspace/static/manifest.json
+!buildspace/static/sw.js
+!buildspace/static/icons/
+buildspace/static/icons/*
+!buildspace/static/icons/icon-*.png
+
+# Generated launchd plist
+scripts/*.plist
+
+# OS junk
+.DS_Store
+
+# Editor state
+.vscode/
+.idea/
