@@ -3,8 +3,9 @@
 import argparse
 import json
 import sys
+from urllib.parse import quote
 
-from buildspace import client
+from buildspace import auth, client
 
 
 def _parse_annotations(items: list[str]) -> list[dict]:
@@ -64,7 +65,24 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("clear", help="wipe history")
     sub.add_parser("status", help="dump history as JSON")
 
+    p_token = sub.add_parser("token", help="print this machine's server token")
+    p_token.add_argument("--rotate", action="store_true",
+                         help="replace it (restart the server; every browser and agent re-pairs)")
+
+    p_pair = sub.add_parser("pair", help="print a link that pairs a browser")
+    p_pair.add_argument("--url", help="base URL the browser will use (default: BUILDSPACE_URL)")
+
     args = parser.parse_args(argv)
+
+    if args.cmd == "token":
+        print(auth.rotate_token() if args.rotate else auth.load_or_create_token())
+        return 0
+    if args.cmd == "pair":
+        base = (args.url or client.BASE_URL).rstrip("/")
+        token = auth.load_or_create_token()
+        print(f"{base}/pair#{quote(token, safe='')}")
+        print("Anyone with this link can use Buildspace. Open it, don't share it.", file=sys.stderr)
+        return 0
 
     if args.cmd == "code":
         result = client.code(

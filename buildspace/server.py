@@ -16,9 +16,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import buildspace.diff as diff_mod
-from buildspace import db, render
+from buildspace import auth, db, render
 
 STATIC_DIR = Path(__file__).parent / "static"
+TOKEN = auth.load_or_create_token()
+
+# Reachable without the token: the open-source app shell (so an unpaired
+# browser can load, find out it's unpaired, and go to /pair) and the pairing
+# flow itself. Everything else, including user images dropped in /static,
+# needs the Bearer token or a paired-browser cookie.
+PUBLIC_PATHS = {
+    "/", "/sw.js", "/manifest.json", "/pair", "/api/pair",
+    "/static/app.css", "/static/app.js", "/static/index.html",
+    "/static/manifest.json", "/static/sw.js",
+}
 
 
 class CodeRequest(BaseModel):
@@ -258,7 +269,29 @@ async def origin_guard(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin is not None and not _origin_allowed(origin):
             return JSONResponse(status_code=403, content={"detail": "cross-origin request refused"})
+    if not _is_public(request.url.path) and not _authorized(request.headers, request.cookies):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Buildspace token required. Agents: set BUILDSPACE_TOKEN "
+                               "(or share ~/.buildspace/token). Browsers: open /pair."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return await call_next(request)
+
+
+def _is_public(path: str) -> bool:
+    if ".." in path:
+        return False
+    if path in PUBLIC_PATHS:
+        return True
+    name = path.rsplit("/", 1)[-1]
+    return path.startswith("/static/icons/") and name.startswith("icon-") and name.endswith(".png")
+
+
+def _authorized(headers, cookies) -> bool:
+    return auth.check_bearer(headers.get("authorization"), TOKEN) or auth.check_cookie(
+        cookies.get(auth.COOKIE_NAME), TOKEN
+    )
 
 
 def _sanitize_for_json(obj):
@@ -332,6 +365,84 @@ async def manifest() -> Response:
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+PAIR_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair · Buildspace</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #0f1117; color: #d7dbe3; font: 15px/1.5 -apple-system, system-ui, sans-serif; }
+  form { width: min(420px, calc(100vw - 32px)); display: grid; gap: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  p { margin: 0; color: #8b93a4; }
+  code { color: #e8b87d; }
+  input { padding: 10px 12px; border-radius: 6px; border: 1px solid #333a4a;
+          background: #161a24; color: inherit; font: 14px ui-monospace, monospace; }
+  button { padding: 10px; border: 0; border-radius: 6px; background: #e8b87d;
+           color: #1a1310; font-weight: 600; font-size: 14px; cursor: pointer; }
+  .err { color: #ff8b8b; min-height: 1.5em; }
+</style></head>
+<body><form id="f">
+  <h1>Pair this browser</h1>
+  <p>Paste the token from the machine running Buildspace. Get it there with
+     <code>buildspace token</code>, or run <code>buildspace pair</code> for a link.</p>
+  <input id="t" type="password" autocomplete="off" placeholder="token" autofocus>
+  <button>Pair</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+  const f = document.getElementById("f"), t = document.getElementById("t"), e = document.getElementById("e");
+  async function pair(token) {
+    const r = await fetch("/api/pair", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ token }) });
+    if (r.ok) { location.replace("/"); return; }
+    e.textContent = "That token didn't match.";
+  }
+  f.addEventListener("submit", (ev) => { ev.preventDefault(); if (t.value.trim()) pair(t.value.trim()); });
+  // Pairing links carry the token in the fragment, which never reaches the
+  // server's logs or a proxy. Clear it from the address bar right away.
+  function pairFromHash() {
+    if (location.hash.length <= 1) return;
+    const token = decodeURIComponent(location.hash.slice(1));
+    history.replaceState(null, "", "/pair");
+    pair(token);
+  }
+  pairFromHash();
+  addEventListener("hashchange", pairFromHash);  // link opened while already on /pair
+</script></body></html>
+"""
+
+
+class PairRequest(BaseModel):
+    token: str
+
+
+@app.get("/pair", response_class=HTMLResponse)
+async def pair_page() -> HTMLResponse:
+    return HTMLResponse(PAIR_PAGE, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.post("/api/pair")
+async def pair(req: PairRequest, request: Request) -> Response:
+    if not auth.check_bearer(f"Bearer {req.token}", TOKEN):
+        raise HTTPException(401, "token mismatch")
+    resp = JSONResponse({"ok": True})
+    # Secure only when the browser is on HTTPS (e.g. behind Tailscale Serve);
+    # a Secure cookie set over plain http would be dropped.
+    https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    resp.set_cookie(
+        auth.COOKIE_NAME,
+        auth.session_value(TOKEN),
+        max_age=400 * 24 * 3600,  # browsers cap cookie lifetime at 400 days
+        httponly=True,
+        samesite="lax",
+        secure=https,
+        path="/",
+    )
+    return resp
 
 
 @app.get("/api/history")
@@ -781,6 +892,12 @@ async def delete_note_annotation(annot_id: int) -> dict:
 async def ws(ws: WebSocket) -> None:
     if not _host_allowed(ws.headers.get("host")) or not _origin_allowed(ws.headers.get("origin")):
         await ws.close(code=1008)  # policy violation
+        return
+    if not _authorized(ws.headers, ws.cookies):
+        # Accept first: a close before accept surfaces in the browser as a
+        # generic failure, and app.js needs 4401 to know to go pair.
+        await ws.accept()
+        await ws.close(code=4401)
         return
     await ws.accept()
     await hub.add(ws)

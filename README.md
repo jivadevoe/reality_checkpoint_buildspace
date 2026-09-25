@@ -15,8 +15,9 @@ daily work with Claude Code, and released under the Apache License 2.0.
 
 ![Buildspace showing a markdown note with a table, entry links and a fenced code block](docs/img/note.png)
 
-> **Personal use only.** Buildspace has no authentication, and it reads any
-> file under `BUILDSPACE_ROOTS` that it is asked for. It is meant to run on
+> **Personal use only.** Buildspace is guarded by a single shared token, not
+> user accounts, and it reads any file under `BUILDSPACE_ROOTS` that a
+> token holder asks for. It is meant to run on
 > your own machine or inside a
 > private network that already authenticates its members, such as a
 > Tailscale tailnet or an SSH tunnel. It is not a secure tool and must not
@@ -108,14 +109,40 @@ All configuration is by environment variable.
 | `BUILDSPACE_MAX_READ_BYTES` | `5242880` (5 MB) | Largest file a code or diff push may name by path |
 | `BUILDSPACE_ALLOWED_HOSTS` | empty | Comma-separated extra hostnames the server may be reached as, for example a reverse-proxy or tailnet name. Loopback, IP literals and the machine's own hostname are always allowed |
 | `BUILDSPACE_URL` | `http://127.0.0.1:8097` | Where the Python client and CLI send pushes |
+| `BUILDSPACE_TOKEN` | unset | The shared secret. On the server it overrides the token file; on a client it is how an agent on another machine authenticates |
+| `BUILDSPACE_TOKEN_FILE` | `~/.buildspace/token` | Where the server keeps its token (created mode 600 on first start) and where a client on the same machine reads it |
+
+### Pairing
+
+Every API call, the WebSocket, `/media` and any image you drop in
+`static/` needs the server's token. Only the app shell and the pairing page
+load without it.
+
+- **An agent on the same machine** needs nothing: the Python client, CLI
+  and MCP server read `~/.buildspace/token`, the same file the server
+  wrote.
+- **An agent on another machine** needs the token handed to it. Run
+  `buildspace token` on the server machine and set `BUILDSPACE_TOKEN` to
+  the result wherever the agent runs, alongside `BUILDSPACE_URL`.
+- **A browser** shows a pairing page the first time. Paste the token, or
+  run `buildspace pair --url https://your-host` on the server machine and
+  open the link it prints on the device. The token rides in the link's
+  `#fragment`, so it never reaches a server log or proxy, and the page
+  clears it from the address bar. The browser keeps an HttpOnly cookie
+  derived from the token for 400 days.
+- `buildspace token --rotate` issues a new token. Restart the server and
+  every browser and agent has to pair again.
 
 ## Security
 
 Buildspace is a personal tool for a protected network, not a public
 service. [SECURITY.md](SECURITY.md) has the full statement. In short:
 
-- There is no authentication. Anyone who can reach the port can push
-  content, delete the timeline, and read the history.
+- Everything except the app shell needs the server's token (see
+  Pairing). It is one shared secret, not user accounts: anyone holding it
+  can push content, delete the timeline, and read the history. Over plain
+  HTTP it crosses the network in the clear, so off-machine use still
+  belongs on HTTPS or a tailnet.
 - `POST /api/code`, `POST /api/diff` and `POST /api/video` take a
   filesystem path and the server reads that file. Those reads are confined
   to `BUILDSPACE_ROOTS`, which defaults to the directory the server was
@@ -208,11 +235,15 @@ buildspace tab code|diff|graph|note|video
 buildspace autofollow on|off
 buildspace status        # timeline as JSON
 buildspace clear         # deletes everything
+buildspace token [--rotate]      # print (or replace) this machine's server token
+buildspace pair [--url URL]      # print a link that pairs a browser
 ```
 
 ## HTTP API
 
 Everything the client does is a JSON POST. Any language can drive it.
+Send `Authorization: Bearer <token>` with every request; without it the
+server answers 401.
 
 | Method | Path | Body |
 |--------|------|------|
@@ -235,7 +266,9 @@ Everything the client does is a JSON POST. Any language can drive it.
 | POST | `/api/annotation` | `{entry_id, comment, block_index? (notes), line_index?, anchor? (uml/graph), block_preview?, kind?}` |
 | GET | `/api/annotations/{id}` | The reader's comments on a note or diagram |
 | DELETE | `/api/annotation/{id}` | Remove one comment |
-| WS | `/ws` | Broadcast channel the page listens on |
+| WS | `/ws` | Broadcast channel the page listens on. Closes with code 4401 when unauthenticated |
+| GET | `/pair` | Pairing page for browsers (no token needed) |
+| POST | `/api/pair` | `{token}`; sets the browser's session cookie (no token needed) |
 
 Every mutation is broadcast over the WebSocket as a typed message
 (`entry_added`, `entry_deleted`, `graph_patch`, `diagram_focus`, `tab`,
@@ -245,7 +278,9 @@ Every mutation is broadcast over the WebSocket as a typed message
 ## Embedding images in notes
 
 The server mounts `buildspace/static/` at `/static/`. Drop an image there
-and reference it as `![caption](/static/name.jpg)` in a note. The
+and reference it as `![caption](/static/name.jpg)` in a note. Those images
+need the token like the rest of the API, so a paired browser shows them and
+nobody else can fetch them. The
 `.gitignore` excludes everything in that directory except the app shell,
 so images you drop there never end up in a commit.
 

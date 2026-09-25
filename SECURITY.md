@@ -10,9 +10,11 @@ reverse proxy, or on shared Wi-Fi.
 
 ## Why
 
-- There is no authentication and no user model. Anyone who can reach the
-  port can read the whole timeline, push content, delete entries, and
-  clear everything.
+- Authentication is a single shared token, with no user model. Anyone
+  holding it can read the whole timeline, push content, delete entries,
+  and clear everything. Over plain HTTP the token (and the browser's
+  session cookie) cross the network unencrypted, so anyone who can watch
+  that traffic can take them.
 - `POST /api/code` and `POST /api/video` take a filesystem path and the
   server reads that file. The path is confined to the roots in
   `BUILDSPACE_ROOTS` (see below), but within those roots whoever can reach
@@ -28,6 +30,28 @@ reverse proxy, or on shared Wi-Fi.
 
 ## What the server does defend against
 
+### Callers without the token
+
+The server generates a random 256-bit token on first start and saves it to
+`~/.buildspace/token` with mode 600 (or takes `BUILDSPACE_TOKEN`). Every
+request except the app shell (`/`, the page's own JS, CSS, manifest,
+service worker and icons) and the pairing endpoints must carry it:
+
+- agents send `Authorization: Bearer <token>`;
+- browsers pair once and then send an HttpOnly, SameSite=Lax cookie holding
+  an HMAC derived from the token, marked Secure when served over HTTPS.
+
+Comparisons are constant-time. Without a valid token the API answers 401
+and the WebSocket closes with code 4401. Rotating the token
+(`buildspace token --rotate`, then restart) invalidates every cookie and
+every agent's copy at once.
+
+This means a person on the same network can no longer read or push just by
+reaching the port. It does not make Buildspace safe to expose publicly:
+there is no rate limiting, no per-user revocation, and no TLS of its own.
+
+### Other web pages in your browser
+
 The one threat that applies even on a single machine is other web pages
 open in your browser. Same-origin policy does not cover WebSocket
 handshakes or body-less POSTs, and DNS rebinding defeats it entirely, so
@@ -39,14 +63,13 @@ the server checks for itself:
   must pass the same test.
 
 That keeps a random website from subscribing to your pushes or wiping
-your timeline. It does nothing against a person on the same network,
-which is why the network has to be one you trust.
+your timeline, even from a browser that is paired.
 
 ### Path confinement
 
 `POST /api/code`, `POST /api/diff` and `POST /api/video` name a file for
-the server to read, so an unauthenticated caller would otherwise have the
-run of the filesystem. Two limits apply to every such path, and to the
+the server to read, so a token holder would otherwise have the run of the
+filesystem. Two limits apply to every such path, and to the
 re-read that happens when `/media/{id}` streams a video:
 
 - The path must resolve inside one of the allowed roots, set with
@@ -77,11 +100,11 @@ A path outside the roots or on the deny list returns 403; an oversized
 file returns 413. Keep `BUILDSPACE_ROOTS` to the directories you actually
 push from.
 
-This confinement limits the damage from an unauthenticated caller. It is
-not a sandbox, and it is not a reason to expose the port.
+This confinement limits the damage if the token leaks. It is not a
+sandbox, and it is not a reason to expose the port.
 
 ## Reporting
 
-If you find a way past the checks above from another origin, or a way to
-read a file outside `BUILDSPACE_ROOTS`, email
+If you find a way past the token check, past the checks above from
+another origin, or a way to read a file outside `BUILDSPACE_ROOTS`, email
 hello@realitycheckpoint.org rather than opening a public issue.

@@ -8,7 +8,7 @@
 //   - Static assets: cache-first with network revalidation.
 //   - Navigation requests: network-first, fall back to cached index.
 
-const CACHE = "buildspace-v8";
+const CACHE = "buildspace-v9";
 const SHELL = [
   "/",
   "/static/app.css",
@@ -49,8 +49,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(req)
         .then((r) => {
-          const copy = r.clone();
-          caches.open(CACHE).then((cache) => cache.put("/", copy));
+          if (r.ok && !r.redirected && url.pathname === "/") {
+            const copy = r.clone();
+            caches.open(CACHE).then((cache) => cache.put("/", copy));
+          }
           return r;
         })
         .catch(() => caches.match("/")),
@@ -64,8 +66,11 @@ self.addEventListener("fetch", (event) => {
       caches.match(req).then((cached) => {
         const fetched = fetch(req)
           .then((r) => {
-            const copy = r.clone();
-            caches.open(CACHE).then((cache) => cache.put(req, copy));
+            // Never cache a 401 for a token-protected image.
+            if (r.ok) {
+              const copy = r.clone();
+              caches.open(CACHE).then((cache) => cache.put(req, copy));
+            }
             return r;
           })
           .catch(() => cached);

@@ -7,18 +7,27 @@ from urllib.parse import quote
 
 import httpx
 
+from buildspace import auth
+
 BASE_URL = os.environ.get("BUILDSPACE_URL", "http://127.0.0.1:8097")
 TIMEOUT = 5.0
 
 
+def _headers() -> dict:
+    # Same machine as the server: read its token file. Elsewhere: the user
+    # hands over the token via BUILDSPACE_TOKEN.
+    token = auth.read_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _post(path: str, payload: dict) -> dict:
-    r = httpx.post(f"{BASE_URL}{path}", json=payload, timeout=TIMEOUT)
+    r = httpx.post(f"{BASE_URL}{path}", json=payload, headers=_headers(), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 
 def _get(path: str) -> Any:
-    r = httpx.get(f"{BASE_URL}{path}", timeout=TIMEOUT)
+    r = httpx.get(f"{BASE_URL}{path}", headers=_headers(), timeout=TIMEOUT)
     r.raise_for_status()
     return r.json()
 

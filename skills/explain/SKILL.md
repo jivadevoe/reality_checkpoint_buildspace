@@ -19,6 +19,8 @@ When you want to explain something visually instead of describing it in chat, pu
 
 ## How to drive it
 
+Buildspace needs its token. On the machine running the server, the client reads `~/.buildspace/token` by itself, so there's nothing to do. Driving a server on another machine needs `BUILDSPACE_TOKEN` (plus `BUILDSPACE_URL`), and only the user can give you that: ask them to run `buildspace token` there. A 401 means the token is missing or stale. Never print the token back into the chat or into a pushed entry.
+
 ```python
 import buildspace
 
@@ -239,7 +241,7 @@ finally:
     shutil.copy2(BACKUP, DB)
 ```
 
-Or better: run against a second Buildspace instance on a different port bound to a different DB file (`BUILDSPACE_PORT=8098 BUILDSPACE_DB=/tmp/bs-test.db scripts/run.sh`, then `BUILDSPACE_URL=http://127.0.0.1:8098`).
+Or better: run against a second Buildspace instance on a different port bound to a different DB file (`BUILDSPACE_PORT=8098 BUILDSPACE_DB=/tmp/bs-test.db BUILDSPACE_TOKEN_FILE=/tmp/bs-test.token scripts/run.sh`, then `BUILDSPACE_URL=http://127.0.0.1:8098 BUILDSPACE_TOKEN_FILE=/tmp/bs-test.token`).
 
 ## Don't use /explain for
 

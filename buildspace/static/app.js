@@ -2205,9 +2205,10 @@
       el.connDot.classList.remove("disconnected");
       el.connDot.classList.add("connected");
     });
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (ev) => {
       el.connDot.classList.remove("connected");
       el.connDot.classList.add("disconnected");
+      if (ev.code === 4401) { goPair(); return; }
       setTimeout(connect, 1200);
     });
     ws.addEventListener("message", (ev) => {
@@ -2287,8 +2288,15 @@
   }
 
   // ---------- bootstrap ----------
+  // Unpaired browser (or the server's token was rotated): the server
+  // answers 401 / closes the socket with 4401. Send the viewer to pair.
+  function goPair() {
+    if (location.pathname !== "/pair") location.replace("/pair");
+  }
+
   async function loadHistory() {
     const r = await fetch("/api/history");
+    if (r.status === 401) { goPair(); return; }
     const data = await r.json();
     state.entries = data.entries || [];
     renderTimeline();
