@@ -122,11 +122,15 @@ class VideoRequest(BaseModel):
 
 class NoteAnnotationRequest(BaseModel):
     entry_id: int
-    block_index: int
     comment: str
+    block_index: int | None = None  # note entries: top-level block
     block_preview: str | None = None
     kind: str | None = None  # note | warn | ok
     line_index: int | None = None  # sub-block anchor (table row, list item)
+    # uml / graph entries: where on the diagram the comment points. uml:
+    # {label, nth, x, y} (label text + which occurrence, with a scene-space
+    # point as fallback); graph: {node} or {x, y} in canvas space.
+    anchor: dict | None = None
 
 
 class TabRequest(BaseModel):
@@ -718,35 +722,53 @@ async def delete_entry(entry_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Note annotations: the viewer leaves comments on paragraphs; the agent reads them back.
+# Viewer annotations: comments on note paragraphs and on diagram (uml/graph)
+# elements; the agent reads them back.
 # ---------------------------------------------------------------------------
 
 
+# Registered under both /api/note/... (original, notes only) and the generic
+# /api/annotation... paths now that diagrams take comments too.
+ANNOTATABLE_KINDS = {"note", "uml", "graph"}
+
+
+@app.post("/api/annotation")
 @app.post("/api/note/annotation")
 async def post_note_annotation(req: NoteAnnotationRequest) -> dict:
     entry = db.get_entry(req.entry_id)
     if entry is None:
         raise HTTPException(404, f"entry {req.entry_id} not found")
-    if entry["kind"] != "note":
-        raise HTTPException(400, f"entry {req.entry_id} is not a note (kind={entry['kind']})")
+    if entry["kind"] not in ANNOTATABLE_KINDS:
+        raise HTTPException(400, f"entry {req.entry_id} can't be annotated (kind={entry['kind']})")
+    if entry["kind"] == "note":
+        if req.block_index is None:
+            raise HTTPException(400, "note annotations need block_index")
+        block_index = req.block_index
+    else:
+        if not req.anchor:
+            raise HTTPException(400, f"{entry['kind']} annotations need an anchor")
+        block_index = -1  # column is NOT NULL; unused for diagrams
 
     annot = db.add_note_annotation(
         entry_id=req.entry_id,
-        block_index=req.block_index,
+        block_index=block_index,
         comment=req.comment,
         block_preview=req.block_preview,
         kind=req.kind,
         line_index=req.line_index,
+        anchor=req.anchor,
     )
     await hub.broadcast({"type": "note_annotation_added", "annotation": annot})
     return annot
 
 
+@app.get("/api/annotations/{entry_id}")
 @app.get("/api/note/annotations/{entry_id}")
 async def get_note_annotations(entry_id: int) -> dict:
     return {"annotations": db.list_note_annotations(entry_id)}
 
 
+@app.delete("/api/annotation/{annot_id}")
 @app.delete("/api/note/annotation/{annot_id}")
 async def delete_note_annotation(annot_id: int) -> dict:
     if not db.delete_note_annotation(annot_id):

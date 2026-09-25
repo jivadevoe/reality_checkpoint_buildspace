@@ -407,14 +407,22 @@ def status() -> dict:
     return _get("/api/history")
 
 
-def get_note_annotations(entry_or_id: Union[dict, int]) -> list[dict]:
-    """Read the viewer's comments on a note entry.
+def get_annotations(entry_or_id: Union[dict, int]) -> list[dict]:
+    """Read the viewer's comments on a note, uml or graph entry.
 
     Each annotation is {id, entry_id, block_index, block_preview, comment,
-    kind, created_at, line_index}. `block_preview` is the first ~80 chars
-    of the annotated block/line. `line_index` is None for whole-block
-    annotations and the 0-based row/item index for sub-block annotations
-    on table rows or list items.
+    kind, created_at, line_index, anchor}. `block_preview` is the first ~80
+    chars of what was annotated (block/line text, diagram label or node id).
+
+    Notes: `block_index` is the top-level block; `line_index` is None for
+    whole-block annotations and the 0-based row/item index for sub-block
+    annotations on table rows or list items. `anchor` is None.
+
+    Diagrams: `block_index` is -1 and `anchor` says where the comment points:
+    uml -> {"label": str|None, "nth": int, "x": float, "y": float} (the
+    clicked element's label text, which occurrence of it, and the click
+    point in diagram space); graph -> {"node": id} or {"x", "y"} for a click
+    on empty canvas.
     """
     if isinstance(entry_or_id, dict):
         eid = entry_or_id.get("id")
@@ -422,5 +430,9 @@ def get_note_annotations(entry_or_id: Union[dict, int]) -> list[dict]:
         eid = entry_or_id
     if eid is None:
         raise ValueError("entry_or_id must be an entry dict with 'id' or an int")
-    data = _get(f"/api/note/annotations/{int(eid)}")
+    data = _get(f"/api/annotations/{int(eid)}")
     return data.get("annotations", [])
+
+
+# Original name, from when only notes took comments.
+get_note_annotations = get_annotations

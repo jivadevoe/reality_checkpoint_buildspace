@@ -8,6 +8,7 @@ from buildspace.client import (
     code,
     diff,
     focus,
+    get_annotations,
     get_note_annotations,
     graph,
     graph_patch,
@@ -51,5 +52,6 @@ __all__ = [
     "autofollow",
     "clear",
     "status",
+    "get_annotations",
     "get_note_annotations",
 ]

@@ -117,32 +117,38 @@ buildspace.clear()             # wipe everything
 ```
 
 
-## Reading the user's annotations on your notes
+## Reading the user's annotations
 
-The user can tap any paragraph in a `note` and leave a comment — it pins as a margin bubble (accent-tinted, distinct from your own pushed annotations). You fetch their comments back via the Python API:
+The user can tap any paragraph in a `note`, or any element of a `uml` or `graph` diagram (including empty space), and leave a comment. It pins as a bubble tinted with the accent colour, distinct from your own pushed annotations. You fetch their comments back via the Python API:
 
 ```python
-annots = buildspace.get_note_annotations(note_entry)   # pass entry dict or int id
+annots = buildspace.get_annotations(entry)   # pass entry dict or int id
 # each annotation:
 # {
 #   "id": int,
 #   "entry_id": int,
-#   "block_index": int,          # 0-based index of the paragraph they tapped
-#   "block_preview": str,        # first ~80 chars of that paragraph
 #   "comment": str,              # what they wrote
+#   "block_preview": str | None, # what they tapped: paragraph text, diagram label, or node label
+#   "block_index": int,          # notes: 0-based index of the paragraph; diagrams: -1
+#   "line_index": int | None,    # notes: table row / list item within the block
+#   "anchor": dict | None,       # diagrams only, see below
 #   "kind": str | None,
 #   "created_at": float,
 # }
 ```
 
-**`block_index`** is positional within the rendered note — block 0 is the first top-level element, block 1 is the next, etc. Notes are immutable entries, so indices are stable for the life of the entry. `block_preview` is the first ~80 chars of the paragraph they annotated — use it to verify you're matching the right block (and to detect drift if you ever re-push a note with reordered paragraphs, though you shouldn't).
+**Notes:** `block_index` is positional within the rendered note. Block 0 is the first top-level element, block 1 the next, and so on. Notes are immutable entries, so indices are stable for the life of the entry. `block_preview` is the first ~80 chars of the paragraph they annotated. Use it to check you're matching the right block.
+
+**Diagrams:** `anchor` says where the comment points.
+- `uml`: `{"label", "nth", "x", "y"}`. `label` is the text of the element they tapped (a participant, class, node or message), and `nth` says which occurrence of that text it was. `label` is None when they tapped something unlabeled (an arrow, a lifeline, empty space). Then `x`/`y`, the tap point in diagram coordinates, is the only locator. Read those comments as "about this area of the diagram".
+- `graph`: `{"node": id}` for a node, or `{"x", "y"}` (canvas coordinates) for a tap elsewhere.
 
 **When to check:**
-- After pushing a note and handing back to the user — check again on your next turn in case they left feedback while you were waiting.
-- When they reference something they "wrote on" or "marked up" — fetch and read before replying.
-- Nothing notifies you when the user annotates. Make checking a habit: on any turn after you pushed a note, call `get_note_annotations()` before assuming there's no feedback.
+- After pushing a note or diagram and handing back to the user. Check again on your next turn in case they left feedback while you were waiting.
+- When they reference something they "wrote on" or "marked up". Fetch and read before replying.
+- Nothing notifies you when the user annotates. Make checking a habit: on any turn after you pushed a note or diagram, call `get_annotations()` before assuming there's no feedback.
 
-Only notes support this return channel today. Code / diff / diagram annotations are still one-way (you push, they read).
+Code and diff annotations are still one-way (you push, they read). (`get_note_annotations` is the old name and still works.)
 
 ## Linking prose to supporting diagrams and code
 

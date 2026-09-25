@@ -47,11 +47,17 @@ def init():
             )
             """
         )
-        # Migration for existing DBs that predate line_index.
-        try:
-            c.execute("ALTER TABLE note_annotations ADD COLUMN line_index INTEGER DEFAULT NULL")
-        except Exception:
-            pass
+        # Migrations for existing DBs that predate line_index / anchor.
+        # `anchor` is a JSON object locating a comment on a diagram (uml or
+        # graph entry); note comments keep using block_index/line_index.
+        for ddl in (
+            "ALTER TABLE note_annotations ADD COLUMN line_index INTEGER DEFAULT NULL",
+            "ALTER TABLE note_annotations ADD COLUMN anchor TEXT DEFAULT NULL",
+        ):
+            try:
+                c.execute(ddl)
+            except Exception:
+                pass
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_note_annot_entry ON note_annotations(entry_id)"
         )
@@ -153,14 +159,16 @@ def add_note_annotation(
     block_preview: str | None = None,
     kind: str | None = None,
     line_index: int | None = None,
+    anchor: dict | None = None,
 ) -> dict:
     now = time.time()
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO note_annotations "
-            "(entry_id, block_index, block_preview, comment, kind, created_at, line_index) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (entry_id, block_index, block_preview, comment, kind, now, line_index),
+            "(entry_id, block_index, block_preview, comment, kind, created_at, line_index, anchor) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (entry_id, block_index, block_preview, comment, kind, now, line_index,
+             json.dumps(anchor) if anchor is not None else None),
         )
         annot_id = cur.lastrowid
     return {
@@ -172,17 +180,24 @@ def add_note_annotation(
         "kind": kind,
         "created_at": now,
         "line_index": line_index,
+        "anchor": anchor,
     }
 
 
 def list_note_annotations(entry_id: int) -> list[dict]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT id, entry_id, block_index, block_preview, comment, kind, created_at, line_index "
+            "SELECT id, entry_id, block_index, block_preview, comment, kind, created_at, "
+            "line_index, anchor "
             "FROM note_annotations WHERE entry_id = ? ORDER BY id ASC",
             (entry_id,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["anchor"] = json.loads(d["anchor"]) if d["anchor"] else None
+        out.append(d)
+    return out
 
 
 def delete_note_annotation(annot_id: int) -> bool:

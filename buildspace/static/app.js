@@ -18,6 +18,10 @@
     mermaidSvg: null,  // the current rendered svg (target of panzoom)
     diagramAnnotations: [],  // current annotations to reposition on every frame
     annotLayer: null,
+    shownEntry: null,  // {id, kind} of the uml/graph entry in the Diagrams tab
+    agentAnnots: [],  // annotations pushed with the entry
+    userAnnots: [],  // the viewer's own comments, fetched from /api/annotations
+    composer: null,  // open diagram comment composer, if any
   };
 
   const el = {
@@ -766,6 +770,7 @@
       graphState.currentId = null;
     }
     disposeMermaidPanzoom();
+    beginDiagramEntry(entry);
     const p = entry.payload || {};
     el.graphTitle.textContent = entry.title || "UML";
     el.graphMeta.textContent = p.kind ? `mermaid · ${p.kind}` : "mermaid";
@@ -781,9 +786,9 @@
       const { svg } = await window.mermaid.render(id, p.mermaid || "");
       el.graphCanvas.innerHTML = svg;
       attachMermaidPanzoom();
-      if (p.annotations && p.annotations.length) {
-        placeDiagramAnnotations(p.annotations);
-      }
+      graphState.agentAnnots = p.annotations || [];
+      if (graphState.agentAnnots.length) refreshDiagramAnnotations();
+      loadDiagramUserAnnotations(entry.id);
     } catch (err) {
       el.graphCanvas.innerHTML = `<pre class="mermaid-error">${escapeHtml(String(err?.message || err))}</pre>`;
     }
@@ -1032,7 +1037,7 @@
       const tRect = target.getBoundingClientRect();
       const anchor = bubbleAnchorPoint(p.bubble, cRect, variant);
       const targetPt = targetAnchorPoint(tRect, cRect, variant);
-      const kind = annotation.kind || "note";
+      const kind = annotation.user ? "user" : annotation.kind || "note";
       const bow = variant === "above" || variant === "below" ? 8 : 14;
       drawConnector(svg, anchor.x, anchor.y, targetPt.x, targetPt.y, kind, bow);
     }
@@ -1049,15 +1054,11 @@
     const bubbles = graphState.annotLayer.querySelectorAll(".annot-bubble.floating");
     bubbles.forEach((bubble, i) => {
       const annotation = graphState.diagramAnnotations[i];
-      if (!annotation || !annotation.node) return;
-      const pos = graphState.network.getPositions([annotation.node])[annotation.node];
-      if (!pos) return;
-      const dom = graphState.network.canvasToDOM(pos);
+      const dom = annotation && graphAnnotDomPos(annotation);
+      if (!dom) return;
       const anchor = bubbleAnchorPoint(bubble, cRect, "side-right");
-      const targetX = dom.x;
-      const targetY = dom.y;
-      const kind = annotation.kind || "note";
-      drawConnector(svg, anchor.x, anchor.y, targetX, targetY, kind, 12);
+      const kind = annotation.user ? "user" : annotation.kind || "note";
+      drawConnector(svg, anchor.x, anchor.y, dom.x, dom.y, kind, 12);
     });
   }
 
@@ -1069,11 +1070,27 @@
     dot.className = "annot-dot";
     b.appendChild(dot);
     b.appendChild(document.createTextNode(annotation.text));
+    if (annotation.user) {
+      b.classList.add("user-annot");
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "annot-del";
+      del.title = "delete annotation";
+      del.textContent = "×";
+      del.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await fetch(`/api/annotation/${annotation.id}`, { method: "DELETE" });
+        } catch {}
+      });
+      b.appendChild(del);
+    }
     return b;
   }
 
   function findSvgTarget(svg, annotation) {
     if (!svg) return null;
+    if (annotation.user) return resolveUserSvgTarget(svg, annotation);
     let sel = annotation.selector || "";
     // Convenience: text_match:Foo finds an SVG text node whose text content
     // equals (or closely matches) "Foo". We return the <text> element
@@ -1184,6 +1201,9 @@
           variant = "below";
           cy = targetBottom + 14 + (annotation.offset_y || 0);
         }
+        // Centred bubbles on targets near the canvas edge (e.g. a comment
+        // pinned to empty space) would hang off it; keep them inside.
+        cx = Math.max(bw / 2 + 6, Math.min(cx, cw - bw / 2 - 6));
       }
       placed.push({ bubble: b, annotation, cx, cy, variant, bw, bh });
     });
@@ -1471,6 +1491,289 @@
     }, { passive: true });
   }
 
+  // ---------- viewer comments on diagrams ----------
+  // Same return channel as note comments: tap a diagram element (or empty
+  // space) to leave a comment; it's stored server-side and the agent reads
+  // it back with get_annotations(). Mermaid comments anchor to the tapped
+  // element's label text (plus which occurrence of that text), with the
+  // tap point in scene space as a fallback for unlabeled things like
+  // arrows and lifelines. Graph comments anchor to a node id or a canvas
+  // point.
+  const DIAGRAM_CONTAINER_SEL = "g.node, g.cluster, g.statediagram-state, g.actor-man";
+
+  function beginDiagramEntry(entry) {
+    closeDiagramComposer();
+    graphState.shownEntry = { id: entry.id, kind: entry.kind };
+    graphState.agentAnnots = [];
+    graphState.userAnnots = [];
+  }
+
+  async function loadDiagramUserAnnotations(entryId) {
+    let annots = [];
+    try {
+      const r = await fetch(`/api/annotations/${entryId}`);
+      if (!r.ok) return;
+      annots = (await r.json()).annotations || [];
+    } catch {
+      return;
+    }
+    // The viewer may have moved on while we were fetching.
+    if (!graphState.shownEntry || graphState.shownEntry.id !== entryId) return;
+    graphState.userAnnots = annots.filter((a) => a.anchor);
+    refreshDiagramAnnotations();
+  }
+
+  function refreshDiagramAnnotations() {
+    const shown = graphState.shownEntry;
+    if (!shown) return;
+    const user = graphState.userAnnots.map((a) => ({
+      user: true,
+      id: a.id,
+      text: a.comment,
+      kind: "note",
+      anchor: a.anchor,
+      node: a.anchor.node,
+    }));
+    const all = graphState.agentAnnots.concat(user);
+    if (shown.kind === "uml") {
+      if (graphState.mermaidSvg) placeDiagramAnnotations(all);
+    } else if (shown.kind === "graph") {
+      if (graphState.network) placeGraphAnnotations(all);
+    }
+  }
+
+  function svgLabelText(elm) {
+    return (elm.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function svgLabels(svg) {
+    return Array.from(svg.querySelectorAll("text, foreignObject"));
+  }
+
+  function resolveUserSvgTarget(svg, annotation) {
+    const anc = annotation.anchor || {};
+    if (anc.label) {
+      const hits = svgLabels(svg).filter((t) => svgLabelText(t) === anc.label);
+      const hit = hits[anc.nth || 0] || hits[0];
+      if (hit) return hit.closest(DIAGRAM_CONTAINER_SEL) || hit;
+    }
+    if (anc.x == null) return null;
+    return userPin(annotation.id, anc.x, anc.y);
+  }
+
+  // An invisible 2x2 rect inside the panzoom scene group, so point-anchored
+  // comments move with pan/zoom and go through the same placement code.
+  function userPin(id, x, y) {
+    const scene = graphState.mermaidSceneGroup;
+    if (!scene) return null;
+    let pin = scene.querySelector(`:scope > rect.bs-user-pin[data-annot-id="${id}"]`);
+    if (!pin) {
+      pin = document.createElementNS(SVG_NS, "rect");
+      pin.setAttribute("class", "bs-user-pin");
+      pin.dataset.annotId = String(id);
+      pin.setAttribute("x", String(x - 1));
+      pin.setAttribute("y", String(y - 1));
+      pin.setAttribute("width", "2");
+      pin.setAttribute("height", "2");
+      pin.setAttribute("fill", "none");
+      pin.style.pointerEvents = "none";
+      scene.appendChild(pin);
+    }
+    return pin;
+  }
+
+  // Work out what a tap on the mermaid svg landed on: the nearest label
+  // (text or foreignObject), else the first label of the enclosing node,
+  // else the lone label of the enclosing group (sequence actors). Returns
+  // {label, nth} or null when the tap hit nothing labeled.
+  function mermaidLabelAt(target) {
+    const svg = graphState.mermaidSvg;
+    let lab = target.closest("text, foreignObject");
+    if (!lab) {
+      const container = target.closest(DIAGRAM_CONTAINER_SEL);
+      if (container) {
+        lab = container.querySelector("text, foreignObject");
+      } else {
+        const g = target.closest("g");
+        if (g && g !== graphState.mermaidSceneGroup) {
+          const own = g.querySelectorAll(":scope > text, :scope > foreignObject");
+          if (own.length === 1) lab = own[0];
+        }
+      }
+    }
+    if (!lab || !svg.contains(lab)) return null;
+    const label = svgLabelText(lab);
+    if (!label) return null;
+    const same = svgLabels(svg).filter((t) => svgLabelText(t) === label);
+    return { label, nth: Math.max(0, same.indexOf(lab)) };
+  }
+
+  function clientToScene(clientX, clientY) {
+    const scene = graphState.mermaidSceneGroup;
+    const m = scene && scene.getScreenCTM();
+    if (!m) return null;
+    const pt = graphState.mermaidSvg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const r = pt.matrixTransform(m.inverse());
+    return { x: r.x, y: r.y };
+  }
+
+  function onMermaidTap(target, clientX, clientY) {
+    const shown = graphState.shownEntry;
+    if (!shown || shown.kind !== "uml" || !graphState.mermaidSvg) return;
+    const pt = clientToScene(clientX, clientY);
+    if (!pt) return;
+    const hit = mermaidLabelAt(target);
+    const anchor = { label: hit ? hit.label : null, nth: hit ? hit.nth : 0, x: pt.x, y: pt.y };
+    openDiagramComposer(clientX, clientY, shown.id, anchor, hit ? hit.label : null);
+  }
+
+  function onGraphClick(params) {
+    const shown = graphState.shownEntry;
+    if (!shown || shown.kind !== "graph" || graphState.composer) return;
+    let anchor;
+    let preview = null;
+    if (params.nodes && params.nodes.length) {
+      const id = params.nodes[0];
+      anchor = { node: id };
+      const n = graphState.nodes && graphState.nodes.get(id);
+      preview = (n && n.label) || String(id);
+    } else {
+      anchor = { x: params.pointer.canvas.x, y: params.pointer.canvas.y };
+    }
+    const cRect = el.graphCanvas.getBoundingClientRect();
+    openDiagramComposer(
+      cRect.left + params.pointer.DOM.x,
+      cRect.top + params.pointer.DOM.y,
+      shown.id,
+      anchor,
+      preview,
+    );
+  }
+
+  // Tap detection for mermaid. panzoom swallows touch clicks, so we watch
+  // pointer events instead: a short press that didn't move is a tap. On
+  // touch, wait out the double-tap window so double-tap-to-reset still
+  // works without popping a composer.
+  (() => {
+    let start = null;
+    let pendingTap = null;
+    el.graphCanvas.addEventListener("pointerdown", (ev) => {
+      start = ev.isPrimary ? { x: ev.clientX, y: ev.clientY, t: Date.now() } : null;
+    }, { passive: true });
+    el.graphCanvas.addEventListener("pointerup", (ev) => {
+      const s = start;
+      start = null;
+      if (!s || !ev.isPrimary || !graphState.mermaidSvg || graphState.composer) return;
+      if (Math.hypot(ev.clientX - s.x, ev.clientY - s.y) > 6 || Date.now() - s.t > 600) return;
+      if (!graphState.mermaidSvg.contains(ev.target)) return;
+      const { target, clientX, clientY } = ev;
+      if (ev.pointerType !== "touch") {
+        onMermaidTap(target, clientX, clientY);
+        return;
+      }
+      if (pendingTap) {
+        clearTimeout(pendingTap);
+        pendingTap = null;
+        return;
+      }
+      pendingTap = setTimeout(() => {
+        pendingTap = null;
+        onMermaidTap(target, clientX, clientY);
+      }, 330);
+    }, { passive: true });
+  })();
+
+  function openDiagramComposer(clientX, clientY, entryId, anchor, preview) {
+    closeDiagramComposer();
+    const cRect = el.graphCanvas.getBoundingClientRect();
+    const localX = clientX - cRect.left;
+    const localY = clientY - cRect.top;
+
+    const mark = document.createElement("div");
+    mark.className = "diagram-composer-mark";
+    mark.style.left = `${localX}px`;
+    mark.style.top = `${localY}px`;
+
+    const host = document.createElement("div");
+    host.className = "note-composer diagram-composer";
+    const hint = document.createElement("div");
+    hint.className = "note-composer-hint";
+    hint.textContent = preview ? `re: ${preview.slice(0, 80)}` : "comment on this spot";
+    const ta = document.createElement("textarea");
+    ta.placeholder = "annotation…";
+    ta.rows = 2;
+    const actions = document.createElement("div");
+    actions.className = "note-composer-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn-secondary";
+    cancel.textContent = "cancel";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "btn-primary";
+    save.textContent = "save";
+    actions.appendChild(cancel);
+    actions.appendChild(save);
+    host.appendChild(hint);
+    host.appendChild(ta);
+    host.appendChild(actions);
+    // Keep taps inside the composer away from panzoom / vis-network.
+    ["pointerdown", "mousedown", "touchstart", "wheel", "click"].forEach((evt) =>
+      host.addEventListener(evt, (ev) => ev.stopPropagation()),
+    );
+
+    el.graphCanvas.appendChild(mark);
+    el.graphCanvas.appendChild(host);
+    graphState.composer = { host, mark };
+
+    // Beside the tap point, flipping left when there's no room on the right;
+    // vertically centred on it, clamped inside the canvas.
+    const w = host.offsetWidth || 260;
+    const h = host.offsetHeight || 120;
+    let x = localX + 16;
+    if (x + w > cRect.width - 8) x = localX - 16 - w;
+    x = Math.max(8, Math.min(x, cRect.width - w - 8));
+    const y = Math.max(8, Math.min(localY - h / 2, cRect.height - h - 8));
+    host.style.left = `${x}px`;
+    host.style.top = `${y}px`;
+    requestAnimationFrame(() => ta.focus());
+
+    cancel.addEventListener("click", closeDiagramComposer);
+    ta.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); closeDiagramComposer(); }
+      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+        ev.preventDefault();
+        save.click();
+      }
+    });
+    save.addEventListener("click", async () => {
+      const comment = ta.value.trim();
+      if (!comment) { closeDiagramComposer(); return; }
+      save.disabled = true;
+      try {
+        const r = await fetch("/api/annotation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entry_id: entryId, comment, anchor, block_preview: preview }),
+        });
+        if (!r.ok) throw new Error(String(r.status));
+      } catch {
+        toast("couldn't save annotation");
+      }
+      closeDiagramComposer();
+    });
+  }
+
+  function closeDiagramComposer() {
+    const c = graphState.composer;
+    if (!c) return;
+    c.host.remove();
+    c.mark.remove();
+    graphState.composer = null;
+  }
+
   // ---------- graph rendering ----------
   const GROUP_PALETTE = {
     default: { background: "#1b2030", border: "#555e74", font: "#d7dbe3" },
@@ -1530,6 +1833,7 @@
     el.graphView.hidden = false;
     el.graphCanvas.classList.remove("mermaid-host");
     disposeMermaidPanzoom();
+    beginDiagramEntry(entry);
     const p = entry.payload || {};
     el.graphTitle.textContent = entry.title || "graph";
     updateGraphMeta(p);
@@ -1593,14 +1897,20 @@
       graphState.network.fit({ animation: { duration: 500, easingFunction: "easeOutQuad" } });
     });
 
-    // Node-anchored annotations.
-    const annotations = p.annotations || [];
+    // Node-anchored annotations (pushed ones now, the viewer's once fetched).
+    graphState.network.on("afterDrawing", repositionGraphAnnotations);
+    graphState.network.on("click", onGraphClick);
+    graphState.agentAnnots = p.annotations || [];
+    refreshDiagramAnnotations();
+    loadDiagramUserAnnotations(entry.id);
+  }
+
+  function placeGraphAnnotations(annotations) {
     graphState.diagramAnnotations = annotations;
     if (annotations.length) {
       const layer = ensureAnnotLayer();
       layer.innerHTML = "";
       for (const a of annotations) layer.appendChild(makeFloatingBubble(a));
-      graphState.network.on("afterDrawing", repositionGraphAnnotations);
       requestAnimationFrame(repositionGraphAnnotations);
       ensureAnnotToggle();
       resetIdleDim();
@@ -1609,9 +1919,25 @@
         graphState.annotLayer.remove();
         graphState.annotLayer = null;
       }
+      const svg = el.graphCanvas.querySelector(":scope > svg.connector-layer");
+      if (svg) svg.remove();
       removeAnnotToggle();
       cancelIdleDim();
     }
+  }
+
+  // Screen position (graph-canvas local) of a graph annotation's target:
+  // a node, or a free canvas point for comments left on empty space.
+  function graphAnnotDomPos(annotation) {
+    const net = graphState.network;
+    if (!net) return null;
+    if (annotation.node != null) {
+      const pos = net.getPositions([annotation.node])[annotation.node];
+      return pos ? net.canvasToDOM(pos) : null;
+    }
+    const anc = annotation.anchor;
+    if (anc && anc.x != null) return net.canvasToDOM({ x: anc.x, y: anc.y });
+    return null;
   }
 
   function repositionGraphAnnotations() {
@@ -1619,14 +1945,13 @@
     const bubbles = graphState.annotLayer.querySelectorAll(".annot-bubble.floating");
     bubbles.forEach((b, i) => {
       const annotation = graphState.diagramAnnotations[i];
-      if (!annotation || !annotation.node) return;
-      const pos = graphState.network.getPositions([annotation.node])[annotation.node];
-      if (!pos) {
+      if (!annotation) return;
+      const dom = graphAnnotDomPos(annotation);
+      if (!dom) {
         b.classList.add("hidden-anchor");
         return;
       }
       b.classList.remove("hidden-anchor");
-      const dom = graphState.network.canvasToDOM(pos);
       const offX = annotation.offset_x ?? 36;
       const offY = annotation.offset_y ?? 0;
       b.style.left = `${dom.x + offX}px`;
@@ -1917,6 +2242,8 @@
         graphState.nodes = null;
         graphState.edges = null;
       }
+      closeDiagramComposer();
+      graphState.shownEntry = null;
       el.graphView.hidden = true;
       el.graphEmpty.hidden = false;
       el.graphCanvas.classList.remove("mermaid-host");
@@ -1949,9 +2276,13 @@
         // them so collision resolution runs with the new bubble included.
         loadNoteAnnotations(a.entry_id);
       }
+      if (a && graphState.shownEntry && a.entry_id === graphState.shownEntry.id) {
+        loadDiagramUserAnnotations(a.entry_id);
+      }
     } else if (msg.type === "note_annotation_deleted") {
       const currentEntry = el.noteBody.dataset.entryId;
       if (currentEntry) loadNoteAnnotations(parseInt(currentEntry, 10));
+      if (graphState.shownEntry) loadDiagramUserAnnotations(graphState.shownEntry.id);
     }
   }
 

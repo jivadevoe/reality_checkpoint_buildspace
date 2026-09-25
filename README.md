@@ -171,7 +171,7 @@ buildspace.highlight(["a"])
 
 entry = buildspace.note("# Summary\nSee " + buildspace.link("the diff", latest="diff"),
                         title="What changed")
-buildspace.get_note_annotations(entry)     # comments the reader left on it
+buildspace.get_annotations(entry)          # comments the reader left on it (notes + diagrams)
 
 buildspace.video("~/renders/cut_v3.mp4", title="Cut v3", notes="- 00:12 audio pop")
 
@@ -232,9 +232,9 @@ Everything the client does is a JSON POST. Any language can drive it.
 | POST | `/api/tab` | `{tab}` |
 | POST | `/api/autofollow` | `{value}` |
 | POST | `/api/clear` | Delete every entry |
-| POST | `/api/note/annotation` | `{entry_id, block_index, comment, block_preview?, kind?, line_index?}` |
-| GET | `/api/note/annotations/{id}` | Comments on a note |
-| DELETE | `/api/note/annotation/{id}` | Remove one comment |
+| POST | `/api/annotation` | `{entry_id, comment, block_index? (notes), line_index?, anchor? (uml/graph), block_preview?, kind?}` |
+| GET | `/api/annotations/{id}` | The reader's comments on a note or diagram |
+| DELETE | `/api/annotation/{id}` | Remove one comment |
 | WS | `/ws` | Broadcast channel the page listens on |
 
 Every mutation is broadcast over the WebSocket as a typed message

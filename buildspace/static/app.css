@@ -1241,3 +1241,38 @@ tr.note-composer-target > th:last-child {
 @media (max-width: 720px) {
   .brand-sep, .brand-maker { display: none; }
 }
+
+/* Viewer comments on diagrams (uml + graph): composer floats beside the
+   tapped spot; saved bubbles and their connectors wear the accent colour
+   like note comments do. */
+.note-composer.diagram-composer {
+  position: absolute;
+  width: 260px;
+  margin: 0;
+  z-index: 6;
+  cursor: auto;
+  animation: composer-appear 0.18s ease-out;
+}
+.diagram-composer-mark {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  background: rgba(232, 184, 125, 0.25);
+  box-shadow: 0 0 0 4px rgba(232, 184, 125, 0.12);
+  pointer-events: none;
+  z-index: 5;
+}
+.annot-bubble.floating.user-annot {
+  background: rgba(42, 36, 24, 0.82);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.04) inset,
+    0 0 0 1px rgba(232,184,125,0.28),
+    0 4px 12px rgba(0,0,0,0.28);
+  padding-right: 24px;
+}
+.annot-bubble.floating.user-annot:hover { background: rgba(42, 36, 24, 0.96); }
+.connector-layer path.kind-user { stroke: var(--accent); }
+.connector-layer circle.kind-user { fill: var(--accent); }
