@@ -8,7 +8,7 @@
 //   - Static assets: cache-first with network revalidation.
 //   - Navigation requests: network-first, fall back to cached index.
 
-const CACHE = "buildspace-v10";
+const CACHE = "buildspace-v11";
 const SHELL = [
   "/",
   "/static/app.css",
@@ -60,7 +60,24 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Static assets: cache-first, update cache in the background.
+  // The app's own code: network-first, so a new version shows up on the
+  // next reload instead of the one after. The cache is the offline fallback.
+  if (url.origin === location.origin && (url.pathname === "/static/app.js" || url.pathname === "/static/app.css")) {
+    event.respondWith(
+      fetch(req)
+        .then((r) => {
+          if (r.ok) {
+            const copy = r.clone();
+            caches.open(CACHE).then((cache) => cache.put(req, copy));
+          }
+          return r;
+        })
+        .catch(() => caches.match(req)),
+    );
+    return;
+  }
+
+  // Other static assets: cache-first, update cache in the background.
   if (url.origin === location.origin && url.pathname.startsWith("/static/")) {
     event.respondWith(
       caches.match(req).then((cached) => {
