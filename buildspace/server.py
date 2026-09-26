@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextvars
+import hashlib
 import ipaddress
 import json
 import os
@@ -374,7 +375,14 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text())
+    # Stamp the app's CSS and JS URLs with a hash of their contents, so a
+    # browser (or the service worker's cache) can never pair a new page
+    # with an old stylesheet.
+    html = (STATIC_DIR / "index.html").read_text()
+    for name in ("app.css", "app.js"):
+        digest = hashlib.sha1((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={digest}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/sw.js")
