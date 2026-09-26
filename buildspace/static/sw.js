@@ -8,7 +8,7 @@
 //   - Static assets: cache-first with network revalidation.
 //   - Navigation requests: network-first, fall back to cached index.
 
-const CACHE = "buildspace-v9";
+const CACHE = "buildspace-v10";
 const SHELL = [
   "/",
   "/static/app.css",

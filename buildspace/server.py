@@ -1,6 +1,7 @@
 # Copyright 2026 Reality Checkpoint
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextvars
 import ipaddress
 import json
 import os
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import buildspace.diff as diff_mod
-from buildspace import auth, db, render
+from buildspace import auth, db, render, responder
 
 STATIC_DIR = Path(__file__).parent / "static"
 TOKEN = auth.load_or_create_token()
@@ -142,6 +143,12 @@ class NoteAnnotationRequest(BaseModel):
     # {label, nth, x, y} (label text + which occurrence, with a scene-space
     # point as fallback); graph: {node} or {x, y} in canvas space.
     anchor: dict | None = None
+    ask: bool = False  # have the responder answer it
+
+
+class AnnotationMessageRequest(BaseModel):
+    text: str
+    ask: bool = False
 
 
 class TabRequest(BaseModel):
@@ -182,6 +189,7 @@ hub = Hub()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    db.fail_pending_messages("Interrupted: Buildspace restarted before the answer came back. Ask again.")
     yield
 
 
@@ -276,7 +284,29 @@ async def origin_guard(request: Request, call_next):
                                "(or share ~/.buildspace/token). Browsers: open /pair."},
             headers={"WWW-Authenticate": "Bearer"},
         )
+    _origin_var.set(_parse_origin(request.headers.get("x-buildspace-origin")))
     return await call_next(request)
+
+
+# The pushing agent describes where it's running (session id, cwd,
+# transcript path) in X-Buildspace-Origin; it's stored with the entry so a
+# responder can answer comments from inside that session.
+_origin_var: contextvars.ContextVar[dict | None] = contextvars.ContextVar("origin", default=None)
+_ORIGIN_KEYS = {"session_id": 64, "cwd": 1024, "transcript": 1024, "host": 255, "agent": 64}
+
+
+def _parse_origin(raw: str | None) -> dict | None:
+    if not raw or len(raw) > 4096:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    out = {k: v for k, v in data.items()
+           if k in _ORIGIN_KEYS and isinstance(v, str) and 0 < len(v) <= _ORIGIN_KEYS[k]}
+    return out or None
 
 
 def _is_public(path: str) -> bool:
@@ -481,7 +511,7 @@ async def post_code(req: CodeRequest) -> dict:
         "line_count": content.count("\n") + 1,
     }
     title = req.title or filename or "code"
-    e = db.add_entry("code", title, payload)
+    e = db.add_entry("code", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -512,7 +542,7 @@ async def post_diff(req: DiffRequest) -> dict:
         "stats": {"add": adds, "remove": removes},
     }
     title = req.title or filename or "diff"
-    e = db.add_entry("diff", title, payload)
+    e = db.add_entry("diff", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -528,7 +558,7 @@ async def post_graph(req: GraphRequest) -> dict:
         "stats": {"nodes": len(req.nodes), "edges": len(req.edges)},
     }
     title = req.title or f"graph ({len(req.nodes)} nodes)"
-    e = db.add_entry("graph", title, payload)
+    e = db.add_entry("graph", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -620,7 +650,7 @@ async def post_uml(req: UmlRequest) -> dict:
         "annotations": [a.model_dump(exclude_none=True) for a in (req.annotations or [])],
     }
     title = req.title or f"UML — {diagram_kind}" if diagram_kind else (req.title or "UML")
-    e = db.add_entry("uml", title, payload)
+    e = db.add_entry("uml", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -656,7 +686,7 @@ async def post_video(req: VideoRequest) -> dict:
         "audio_codec": meta.get("audio_codec"),
     }
     title = req.title or src.name
-    e = db.add_entry("video", title, payload)
+    e = db.add_entry("video", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -783,7 +813,7 @@ async def post_note(req: NoteRequest) -> dict:
         "markdown": req.markdown,
         "length": len(req.markdown),
     }
-    e = db.add_entry("note", title, payload)
+    e = db.add_entry("note", title, payload, origin=_origin_var.get())
     await hub.broadcast({"type": "entry_added", "entry": e})
     return e
 
@@ -869,8 +899,103 @@ async def post_note_annotation(req: NoteAnnotationRequest) -> dict:
         line_index=req.line_index,
         anchor=req.anchor,
     )
+    annot["messages"] = []
+    if req.ask and RESPONDER_CMD:
+        annot["messages"].append(_ask(annot, req.comment))
     await hub.broadcast({"type": "note_annotation_added", "annotation": annot})
     return annot
+
+
+@app.get("/api/annotation/{annot_id}")
+async def get_annotation(annot_id: int) -> dict:
+    annot = db.get_note_annotation(annot_id)
+    if annot is None:
+        raise HTTPException(404, "annotation not found")
+    entry = db.get_entry(annot["entry_id"])
+    annot["messages"] = db.list_annotation_messages(annot_id)
+    annot["entry"] = {"id": annot["entry_id"], "kind": entry["kind"] if entry else None,
+                      "title": entry["title"] if entry else None}
+    return annot
+
+
+@app.post("/api/annotation/{annot_id}/message")
+async def post_annotation_message(annot_id: int, req: AnnotationMessageRequest) -> dict:
+    annot = db.get_note_annotation(annot_id)
+    if annot is None:
+        raise HTTPException(404, "annotation not found")
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "empty message")
+    msgs = [db.add_annotation_message(annot_id, "user", text)]
+    if req.ask and RESPONDER_CMD:
+        msgs.append(_ask(annot, text))
+    await _broadcast_thread(annot)
+    return {"messages": msgs}
+
+
+@app.get("/api/config")
+async def config() -> dict:
+    return {"responder": bool(RESPONDER_CMD), "responder_name": responder.display_name()}
+
+
+# ---------------------------------------------------------------------------
+# Responder: answers comments the viewer marked "ask" (see responder.py).
+# ---------------------------------------------------------------------------
+
+RESPONDER_CMD = responder.command_from_env()
+RESPONDER_TIMEOUT = responder.timeout_from_env()
+_responder_slots = asyncio.Semaphore(2)
+_responder_tasks: set[asyncio.Task] = set()
+
+
+def _ask(annot: dict, question: str) -> dict:
+    """Queue an answer: a pending agent message now, filled in when the
+    responder returns."""
+    msg = db.add_annotation_message(annot["id"], "agent", status="pending")
+    task = asyncio.create_task(_answer(annot, msg["id"], question))
+    _responder_tasks.add(task)  # keep a reference so it isn't collected mid-run
+    task.add_done_callback(_responder_tasks.discard)
+    return msg
+
+
+async def _answer(annot: dict, msg_id: int, question: str) -> None:
+    entry = db.get_entry(annot["entry_id"]) or {"id": annot["entry_id"], "kind": None, "payload": {}}
+    history = [m for m in db.list_annotation_messages(annot["id"]) if m["id"] != msg_id]
+    resume = next((m["meta"].get("session_id") for m in reversed(history)
+                   if m["author"] == "agent" and m["status"] == "done" and m["meta"].get("session_id")), None)
+    # The question itself is the newest user message; don't repeat it as history.
+    thread = [{"author": m["author"], "text": m["text"]} for m in history
+              if m["status"] == "done" and not (m["author"] == "user" and m["text"] == question)]
+    job = {
+        "entry": {k: entry.get(k) for k in ("id", "kind", "title", "payload")},
+        "annotation": {k: annot.get(k) for k in
+                       ("id", "comment", "block_preview", "block_index", "line_index", "anchor")},
+        "thread": thread,
+        "question": question,
+        "origin": db.get_entry_origin(annot["entry_id"]),
+        "resume_session": resume,
+    }
+    async with _responder_slots:
+        try:
+            result = await responder.run(RESPONDER_CMD, job, RESPONDER_TIMEOUT)
+            meta = {k: result[k] for k in ("session_id", "cost_usd", "mode") if result.get(k) is not None}
+            db.update_annotation_message(msg_id, text=str(result["text"]).strip(), status="done", meta=meta)
+        except responder.ResponderError as e:
+            db.update_annotation_message(msg_id, text=str(e), status="error")
+        except Exception as e:  # never leave it pending
+            db.update_annotation_message(msg_id, text=f"{type(e).__name__}: {e}", status="error")
+    await _broadcast_thread(annot, answered=True)
+
+
+async def _broadcast_thread(annot: dict, answered: bool = False) -> None:
+    entry = db.get_entry(annot["entry_id"])
+    await hub.broadcast({
+        "type": "annotation_thread",
+        "annotation_id": annot["id"],
+        "entry_id": annot["entry_id"],
+        "entry_title": entry["title"] if entry else None,
+        "answered": answered,
+    })
 
 
 @app.get("/api/annotations/{entry_id}")

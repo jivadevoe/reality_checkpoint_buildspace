@@ -491,7 +491,36 @@
     );
   }
 
+  function syncNoteToggle(count) {
+    const head = el.noteView.querySelector(".code-head");
+    let btn = head.querySelector(".annot-toggle");
+    const entryId = parseInt(el.noteBody.dataset.entryId, 10);
+    if (!count) {
+      if (btn) btn.remove();
+      el.noteBody.classList.remove("annotations-hidden");
+      return;
+    }
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "annot-toggle note-annot-toggle";
+      btn.title = "hide/show comments (remembered for this note)";
+      btn.innerHTML = '<span class="dot"></span><span>comments</span>';
+      btn.addEventListener("click", () => {
+        const id = parseInt(el.noteBody.dataset.entryId, 10);
+        const nowHidden = el.noteBody.classList.toggle("annotations-hidden");
+        setAnnotationsHidden(id, nowHidden);
+        btn.classList.toggle("off", nowHidden);
+      });
+      head.insertBefore(btn, head.querySelector("#note-meta"));
+    }
+    const hidden = annotationsHidden(entryId);
+    el.noteBody.classList.toggle("annotations-hidden", hidden);
+    btn.classList.toggle("off", hidden);
+  }
+
   function placeNoteAnnotations(annotations) {
+    syncNoteToggle(annotations ? annotations.length : 0);
     if (!annotations || !annotations.length) return;
     el.noteBody.classList.add("has-annots");
 
@@ -508,6 +537,8 @@
       dot.className = "annot-dot";
       b.appendChild(dot);
       b.appendChild(document.createTextNode(a.comment));
+      const badge = threadBadge(a.messages);
+      if (badge) b.appendChild(badge);
       const del = document.createElement("button");
       del.type = "button";
       del.className = "annot-del";
@@ -520,6 +551,10 @@
         } catch {}
       });
       b.appendChild(del);
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openThread(a.id);
+      });
       // Bubbles always live at the top level of noteBody (insertBefore
       // into a tbody would break table rendering). Anchor rect comes from
       // the line element; layout hops over the table.
@@ -586,6 +621,8 @@
     cancel.className = "btn-secondary";
     cancel.textContent = "cancel";
 
+    const ask = makeAskToggle();
+    if (ask) actions.appendChild(ask.el);
     actions.appendChild(cancel);
     actions.appendChild(save);
     host.appendChild(ta);
@@ -666,15 +703,8 @@
         block_preview: preview,
       };
       if (lineIndex != null) body.line_index = lineIndex;
-      try {
-        await fetch("/api/note/annotation", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-      } catch (err) {
-        toast("couldn't save annotation");
-      }
+      if (ask && ask.checked) body.ask = true;
+      await saveAnnotation("/api/note/annotation", body);
       close();
     });
   }
@@ -846,13 +876,41 @@
     el.graphCanvas.addEventListener(evt, resetIdleDim, { passive: true });
   });
 
+  // Hidden/shown is remembered per entry in this browser, so hiding the
+  // annotations on something keeps them hidden when you come back to it.
+  const HIDDEN_KEY = "buildspace-hidden-annotations";
+
+  function hiddenEntries() {
+    try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]")); } catch { return new Set(); }
+  }
+
+  function annotationsHidden(entryId) {
+    return entryId != null && hiddenEntries().has(entryId);
+  }
+
+  function setAnnotationsHidden(entryId, hidden) {
+    if (entryId == null) return;
+    const set = hiddenEntries();
+    if (hidden) set.add(entryId); else set.delete(entryId);
+    // Newest last; keep the list from growing forever.
+    const list = Array.from(set).slice(-500);
+    try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(list)); } catch {}
+  }
+
+  function applyDiagramHidden() {
+    const id = graphState.shownEntry && graphState.shownEntry.id;
+    const hidden = annotationsHidden(id);
+    el.graphCanvas.classList.toggle("annotations-hidden", hidden);
+    if (hidden) cancelIdleDim();
+  }
+
   function ensureAnnotToggle() {
     let btn = el.graphCanvas.querySelector(":scope > .annot-toggle");
-    if (btn) return btn;
+    if (btn) { applyDiagramHidden(); return btn; }
     btn = document.createElement("button");
     btn.className = "annot-toggle";
     btn.type = "button";
-    btn.title = "hide/show annotations (local to this diagram)";
+    btn.title = "hide/show annotations (remembered for this diagram)";
     const dot = document.createElement("span");
     dot.className = "dot";
     btn.appendChild(dot);
@@ -862,6 +920,7 @@
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
       const nowHidden = el.graphCanvas.classList.toggle("annotations-hidden");
+      setAnnotationsHidden(graphState.shownEntry && graphState.shownEntry.id, nowHidden);
       if (nowHidden) {
         cancelIdleDim();
       } else {
@@ -869,6 +928,7 @@
       }
     });
     el.graphCanvas.appendChild(btn);
+    applyDiagramHidden();
     return btn;
   }
 
@@ -1072,6 +1132,12 @@
     b.appendChild(document.createTextNode(annotation.text));
     if (annotation.user) {
       b.classList.add("user-annot");
+      const badge = threadBadge(annotation.messages);
+      if (badge) b.appendChild(badge);
+      b.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openThread(annotation.id);
+      });
       const del = document.createElement("button");
       del.type = "button";
       del.className = "annot-del";
@@ -1533,6 +1599,7 @@
       kind: "note",
       anchor: a.anchor,
       node: a.anchor.node,
+      messages: a.messages,
     }));
     const all = graphState.agentAnnots.concat(user);
     if (shown.kind === "uml") {
@@ -1714,6 +1781,8 @@
     save.type = "button";
     save.className = "btn-primary";
     save.textContent = "save";
+    const ask = makeAskToggle();
+    if (ask) actions.appendChild(ask.el);
     actions.appendChild(cancel);
     actions.appendChild(save);
     host.appendChild(hint);
@@ -1752,16 +1821,9 @@
       const comment = ta.value.trim();
       if (!comment) { closeDiagramComposer(); return; }
       save.disabled = true;
-      try {
-        const r = await fetch("/api/annotation", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ entry_id: entryId, comment, anchor, block_preview: preview }),
-        });
-        if (!r.ok) throw new Error(String(r.status));
-      } catch {
-        toast("couldn't save annotation");
-      }
+      const body = { entry_id: entryId, comment, anchor, block_preview: preview };
+      if (ask && ask.checked) body.ask = true;
+      await saveAnnotation("/api/annotation", body);
       closeDiagramComposer();
     });
   }
@@ -2197,6 +2259,207 @@
     }
   }
 
+  // ---------- comment threads + responder ----------
+  // A comment can start a conversation: the viewer ticks "ask <agent>" and
+  // the server's responder (if one is configured) answers it, in the
+  // context of the session that pushed the entry. Threads open in a side
+  // panel with the replies and a box for follow-ups.
+  const threadState = {
+    config: { responder: false, responder_name: "agent" },
+    openId: null,
+    panel: null,
+  };
+
+  async function loadConfig() {
+    try {
+      const r = await fetch("/api/config");
+      if (r.ok) threadState.config = await r.json();
+    } catch {}
+  }
+
+  function askPref() {
+    try { return localStorage.getItem("buildspace-ask") !== "0"; } catch { return true; }
+  }
+
+  function setAskPref(v) {
+    try { localStorage.setItem("buildspace-ask", v ? "1" : "0"); } catch {}
+  }
+
+  // "ask <agent>" checkbox for composers. null when no responder is set up.
+  function makeAskToggle() {
+    if (!threadState.config.responder) return null;
+    const label = document.createElement("label");
+    label.className = "ask-toggle";
+    label.title = "have the agent answer this comment";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = askPref();
+    cb.addEventListener("change", () => setAskPref(cb.checked));
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(`ask ${threadState.config.responder_name}`));
+    return { el: label, get checked() { return cb.checked; } };
+  }
+
+  async function saveAnnotation(url, body) {
+    if (annotationsHidden(body.entry_id)) {
+      setAnnotationsHidden(body.entry_id, false);
+      if (graphState.shownEntry && graphState.shownEntry.id === body.entry_id) applyDiagramHidden();
+    }
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(String(r.status));
+      const annot = await r.json();
+      // Asked: open the thread so the answer shows up where they're looking.
+      if (body.ask && annot.messages && annot.messages.length) openThread(annot.id);
+    } catch {
+      toast("couldn't save annotation");
+    }
+  }
+
+  // Small status chip on a comment bubble: thinking / N replies / failed.
+  function threadBadge(messages) {
+    const agent = (messages || []).filter((m) => m.author === "agent");
+    if (!agent.length) return null;
+    const last = agent[agent.length - 1];
+    const b = document.createElement("span");
+    b.className = "thread-badge status-" + last.status;
+    if (last.status === "pending") b.textContent = "thinking…";
+    else if (last.status === "error") b.textContent = "no answer";
+    else b.textContent = agent.length === 1 ? "1 reply" : `${agent.length} replies`;
+    return b;
+  }
+
+  function ensureThreadPanel() {
+    if (threadState.panel) return threadState.panel;
+    const panel = document.createElement("aside");
+    panel.className = "thread-panel";
+    panel.hidden = true;
+    panel.innerHTML = `
+      <header class="thread-head">
+        <div class="thread-titles">
+          <a class="thread-entry" href="#"></a>
+          <div class="thread-target"></div>
+        </div>
+        <button type="button" class="thread-close" title="close">×</button>
+      </header>
+      <div class="thread-body"></div>
+      <form class="thread-foot">
+        <textarea rows="2" placeholder="follow up…"></textarea>
+        <div class="thread-actions"><button type="submit" class="btn-primary">send</button></div>
+      </form>`;
+    const foot = panel.querySelector(".thread-foot");
+    const ta = foot.querySelector("textarea");
+    const ask = makeAskToggle();
+    if (ask) foot.querySelector(".thread-actions").prepend(ask.el);
+    panel.querySelector(".thread-close").addEventListener("click", closeThread);
+    panel.querySelector(".thread-entry").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const id = parseInt(ev.currentTarget.dataset.entryId, 10);
+      if (id) setActiveEntry(id, { fromUser: true });
+    });
+    ta.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); closeThread(); }
+      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); foot.requestSubmit(); }
+    });
+    foot.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const text = ta.value.trim();
+      const id = threadState.openId;
+      if (!text || !id) return;
+      ta.value = "";
+      try {
+        const r = await fetch(`/api/annotation/${id}/message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, ask: !!(ask && ask.checked) }),
+        });
+        if (!r.ok) throw new Error(String(r.status));
+      } catch {
+        ta.value = text;
+        toast("couldn't send");
+      }
+      refreshThread();
+    });
+    document.body.appendChild(panel);
+    threadState.panel = panel;
+    return panel;
+  }
+
+  async function openThread(annotId) {
+    const panel = ensureThreadPanel();
+    threadState.openId = annotId;
+    panel.hidden = false;
+    panel.querySelector(".thread-body").innerHTML = "";
+    await refreshThread();
+    if (window.matchMedia("(hover: hover)").matches) panel.querySelector("textarea").focus();
+  }
+
+  function closeThread() {
+    threadState.openId = null;
+    if (threadState.panel) threadState.panel.hidden = true;
+  }
+
+  function threadTargetText(a) {
+    const anc = a.anchor || {};
+    if (a.block_preview) return a.block_preview;
+    if (anc.label) return anc.label;
+    if (anc.node != null) return String(anc.node);
+    return "a spot on the diagram";
+  }
+
+  async function refreshThread() {
+    const id = threadState.openId;
+    const panel = threadState.panel;
+    if (!id || !panel) return;
+    let a;
+    try {
+      const r = await fetch(`/api/annotation/${id}`);
+      if (r.status === 404) { closeThread(); return; }
+      if (!r.ok) return;
+      a = await r.json();
+    } catch {
+      return;
+    }
+    if (threadState.openId !== id) return;
+    const link = panel.querySelector(".thread-entry");
+    link.textContent = `#${a.entry.id} ${a.entry.title || a.entry.kind || ""}`;
+    link.dataset.entryId = String(a.entry.id);
+    panel.querySelector(".thread-target").textContent = `on: ${threadTargetText(a)}`;
+
+    const body = panel.querySelector(".thread-body");
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    body.innerHTML = "";
+    const add = (author, status, html, text) => {
+      const m = document.createElement("div");
+      m.className = `thread-msg from-${author} status-${status}`;
+      const who = document.createElement("div");
+      who.className = "thread-who";
+      who.textContent = author === "user" ? "you" : threadState.config.responder_name;
+      m.appendChild(who);
+      const content = document.createElement("div");
+      content.className = "thread-text";
+      if (html != null) content.innerHTML = html;
+      else content.textContent = text;
+      m.appendChild(content);
+      body.appendChild(m);
+    };
+    add("user", "done", null, a.comment);
+    for (const m of a.messages || []) {
+      if (m.author === "user") add("user", m.status, null, m.text);
+      else if (m.status === "pending") add("agent", "pending", null, "thinking…");
+      else if (m.status === "error") add("agent", "error", null, m.text || "no answer");
+      else add("agent", "done", renderMarkdown(m.text || ""), null);
+    }
+    body.querySelectorAll("pre code").forEach((c) => {
+      try { hljs.highlightElement(c); } catch {}
+    });
+    if (atBottom || body.childElementCount <= 2) body.scrollTop = body.scrollHeight;
+  }
+
   // ---------- websocket ----------
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -2284,6 +2547,17 @@
       const currentEntry = el.noteBody.dataset.entryId;
       if (currentEntry) loadNoteAnnotations(parseInt(currentEntry, 10));
       if (graphState.shownEntry) loadDiagramUserAnnotations(graphState.shownEntry.id);
+      if (threadState.openId === msg.id) closeThread();
+    } else if (msg.type === "annotation_thread") {
+      if (String(msg.entry_id) === el.noteBody.dataset.entryId) loadNoteAnnotations(msg.entry_id);
+      if (graphState.shownEntry && graphState.shownEntry.id === msg.entry_id) {
+        loadDiagramUserAnnotations(msg.entry_id);
+      }
+      if (threadState.openId === msg.annotation_id) {
+        refreshThread();
+      } else if (msg.answered) {
+        toast(`${threadState.config.responder_name} replied on “${msg.entry_title || "entry " + msg.entry_id}”`);
+      }
     }
   }
 
@@ -2356,6 +2630,7 @@
   window.addEventListener("hashchange", () => navigateFromHash());
 
   bindUI();
+  loadConfig();
   loadHistory();
   connect();
   registerServiceWorker();

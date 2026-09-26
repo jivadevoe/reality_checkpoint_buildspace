@@ -145,6 +145,8 @@ annots = buildspace.get_annotations(entry)   # pass entry dict or int id
 - `uml`: `{"label", "nth", "x", "y"}`. `label` is the text of the element they tapped (a participant, class, node or message), and `nth` says which occurrence of that text it was. `label` is None when they tapped something unlabeled (an arrow, a lifeline, empty space). Then `x`/`y`, the tap point in diagram coordinates, is the only locator. Read those comments as "about this area of the diagram".
 - `graph`: `{"node": id}` for a node, or `{"x", "y"}` (canvas coordinates) for a tap elsewhere.
 
+**Threads:** each annotation has `messages`, the conversation under it: the user's follow-ups (`author: "user"`) and the responder's answers (`author: "agent"`, `status` pending/done/error). If the server runs a responder, a copy of your session may already have answered the user in the thread. Read it before replying, so you don't contradict it or repeat it. The copy can't change anything, so requests for changes it relayed are yours to do.
+
 **When to check:**
 - After pushing a note or diagram and handing back to the user. Check again on your next turn in case they left feedback while you were waiting.
 - When they reference something they "wrote on" or "marked up". Fetch and read before replying.

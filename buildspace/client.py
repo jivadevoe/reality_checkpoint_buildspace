@@ -1,6 +1,9 @@
 # Copyright 2026 Reality Checkpoint
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
+import socket
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Union
 from urllib.parse import quote
@@ -17,7 +20,30 @@ def _headers() -> dict:
     # Same machine as the server: read its token file. Elsewhere: the user
     # hands over the token via BUILDSPACE_TOKEN.
     token = auth.read_token()
-    return {"Authorization": f"Bearer {token}"} if token else {}
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    origin = _origin()
+    if origin:
+        headers["X-Buildspace-Origin"] = json.dumps(origin)
+    return headers
+
+
+@lru_cache(maxsize=1)
+def _origin() -> dict | None:
+    """Where this push comes from, so a responder can later answer the
+    viewer's comments from inside the same agent session. Claude Code sets
+    CLAUDE_CODE_SESSION_ID for everything it runs; its transcript lives at
+    <config dir>/projects/<cwd slug>/<session id>.jsonl."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not sid:
+        return None
+    origin = {"agent": "claude-code", "session_id": sid, "cwd": os.getcwd(), "host": socket.gethostname()}
+    config_dirs = [os.environ.get("CLAUDE_CONFIG_DIR"), str(Path.home() / ".claude")]
+    for d in filter(None, config_dirs):
+        hits = list((Path(d).expanduser() / "projects").glob(f"*/{sid}.jsonl"))
+        if hits:
+            origin["transcript"] = str(hits[0])
+            break
+    return origin
 
 
 def _post(path: str, payload: dict) -> dict:
@@ -432,6 +458,10 @@ def get_annotations(entry_or_id: Union[dict, int]) -> list[dict]:
     clicked element's label text, which occurrence of it, and the click
     point in diagram space); graph -> {"node": id} or {"x", "y"} for a click
     on empty canvas.
+
+    `messages` is the thread under the comment: the viewer's follow-ups
+    (author "user") and responder answers (author "agent", status
+    "pending" | "done" | "error"), oldest first.
     """
     if isinstance(entry_or_id, dict):
         eid = entry_or_id.get("id")

@@ -53,6 +53,9 @@ def init():
         for ddl in (
             "ALTER TABLE note_annotations ADD COLUMN line_index INTEGER DEFAULT NULL",
             "ALTER TABLE note_annotations ADD COLUMN anchor TEXT DEFAULT NULL",
+            # Where an entry came from (agent session id, cwd, transcript
+            # path), so a responder can answer comments with that context.
+            "ALTER TABLE entries ADD COLUMN origin TEXT DEFAULT NULL",
         ):
             try:
                 c.execute(ddl)
@@ -61,14 +64,35 @@ def init():
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_note_annot_entry ON note_annotations(entry_id)"
         )
+        # The conversation hanging off an annotation: the viewer's follow-ups
+        # (author "user") and responder answers (author "agent"), which go
+        # pending -> done | error.
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS annotation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                annotation_id INTEGER NOT NULL,
+                author TEXT NOT NULL,
+                text TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'done',
+                meta TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(annotation_id) REFERENCES note_annotations(id) ON DELETE CASCADE
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_annot_msg_annot ON annotation_messages(annotation_id)"
+        )
 
 
-def add_entry(kind: str, title: str | None, payload: dict) -> dict:
+def add_entry(kind: str, title: str | None, payload: dict, origin: dict | None = None) -> dict:
     now = time.time()
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO entries (created_at, kind, title, payload) VALUES (?, ?, ?, ?)",
-            (now, kind, title, json.dumps(payload)),
+            "INSERT INTO entries (created_at, kind, title, payload, origin) VALUES (?, ?, ?, ?, ?)",
+            (now, kind, title, json.dumps(payload), json.dumps(origin) if origin else None),
         )
         entry_id = cur.lastrowid
     return {
@@ -115,6 +139,12 @@ def get_entry(entry_id: int) -> dict | None:
     }
 
 
+def get_entry_origin(entry_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT origin FROM entries WHERE id = ?", (entry_id,)).fetchone()
+    return json.loads(row["origin"]) if row and row["origin"] else None
+
+
 def update_payload(entry_id: int, payload: dict) -> None:
     with _conn() as c:
         c.execute(
@@ -150,6 +180,7 @@ def clear_entries():
     with _conn() as c:
         c.execute("DELETE FROM entries")
         c.execute("DELETE FROM note_annotations")
+        c.execute("DELETE FROM annotation_messages")
 
 
 def add_note_annotation(
@@ -196,6 +227,7 @@ def list_note_annotations(entry_id: int) -> list[dict]:
     for r in rows:
         d = dict(r)
         d["anchor"] = json.loads(d["anchor"]) if d["anchor"] else None
+        d["messages"] = list_annotation_messages(d["id"])
         out.append(d)
     return out
 
@@ -203,4 +235,81 @@ def list_note_annotations(entry_id: int) -> list[dict]:
 def delete_note_annotation(annot_id: int) -> bool:
     with _conn() as c:
         cur = c.execute("DELETE FROM note_annotations WHERE id = ?", (annot_id,))
+        c.execute("DELETE FROM annotation_messages WHERE annotation_id = ?", (annot_id,))
     return cur.rowcount > 0
+
+
+def get_note_annotation(annot_id: int) -> dict | None:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id, entry_id, block_index, block_preview, comment, kind, created_at, "
+            "line_index, anchor FROM note_annotations WHERE id = ?",
+            (annot_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["anchor"] = json.loads(d["anchor"]) if d["anchor"] else None
+    return d
+
+
+def _message(row) -> dict:
+    d = dict(row)
+    d["meta"] = json.loads(d["meta"]) if d["meta"] else {}
+    return d
+
+
+def add_annotation_message(annotation_id: int, author: str, text: str = "",
+                           status: str = "done", meta: dict | None = None) -> dict:
+    now = time.time()
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO annotation_messages "
+            "(annotation_id, author, text, status, meta, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (annotation_id, author, text, status, json.dumps(meta or {}), now, now),
+        )
+        row = c.execute("SELECT * FROM annotation_messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return _message(row)
+
+
+def update_annotation_message(msg_id: int, *, text: str | None = None,
+                              status: str | None = None, meta: dict | None = None) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM annotation_messages WHERE id = ?", (msg_id,)).fetchone()
+        if not row:
+            return None
+        cur = _message(row)
+        c.execute(
+            "UPDATE annotation_messages SET text = ?, status = ?, meta = ?, updated_at = ? WHERE id = ?",
+            (
+                cur["text"] if text is None else text,
+                cur["status"] if status is None else status,
+                json.dumps(cur["meta"] if meta is None else meta),
+                time.time(),
+                msg_id,
+            ),
+        )
+        row = c.execute("SELECT * FROM annotation_messages WHERE id = ?", (msg_id,)).fetchone()
+    return _message(row)
+
+
+def list_annotation_messages(annotation_id: int) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM annotation_messages WHERE annotation_id = ? ORDER BY id ASC",
+            (annotation_id,),
+        ).fetchall()
+    return [_message(r) for r in rows]
+
+
+def fail_pending_messages(reason: str) -> int:
+    """Mark answers left pending by a restart as failed, so the UI doesn't
+    show "thinking" forever."""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE annotation_messages SET status = 'error', text = ?, updated_at = ? "
+            "WHERE status = 'pending'",
+            (reason, time.time()),
+        )
+    return cur.rowcount

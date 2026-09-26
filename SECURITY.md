@@ -103,6 +103,23 @@ push from.
 This confinement limits the damage if the token leaks. It is not a
 sandbox, and it is not a reason to expose the port.
 
+## The responder
+
+With `BUILDSPACE_RESPONDER` set, a comment marked "ask" becomes the prompt
+for an agent running as you on the server machine. Only token holders can
+comment, so only they can prompt it. The bundled Claude Code responder
+keeps that agent read-only (`--tools Read,Grep,Glob`,
+`--permission-mode dontAsk`, `--strict-mcp-config`): it can read what you
+can read, but it can't run commands, edit files or reach the network
+through tools. Its answer is shown to whoever holds the token, so anything
+it reads can end up in a reply. Leave the responder unset if that's more
+reach than you want.
+
+The origin an agent attaches to a push (session id, working directory,
+transcript path) is stored with the entry. The responder only resumes a
+session whose transcript file exists under a Claude Code `projects`
+directory and matches the session id.
+
 ## Reporting
 
 If you find a way past the token check, past the checks above from

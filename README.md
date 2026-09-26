@@ -110,6 +110,11 @@ All configuration is by environment variable.
 | `BUILDSPACE_ALLOWED_HOSTS` | empty | Comma-separated extra hostnames the server may be reached as, for example a reverse-proxy or tailnet name. Loopback, IP literals and the machine's own hostname are always allowed |
 | `BUILDSPACE_URL` | `http://127.0.0.1:8097` | Where the Python client and CLI send pushes |
 | `BUILDSPACE_TOKEN` | unset | The shared secret. On the server it overrides the token file; on a client it is how an agent on another machine authenticates |
+| `BUILDSPACE_RESPONDER` | unset | Command that answers comments the viewer marks "ask" (see Comment threads). `claude` uses the bundled Claude Code responder |
+| `BUILDSPACE_RESPONDER_NAME` | `Claude` for `claude`, else `agent` | Name shown on the ask toggle and replies |
+| `BUILDSPACE_RESPONDER_TIMEOUT` | `600` | Seconds before an answer is abandoned |
+| `BUILDSPACE_RESPONDER_MODEL` | Claude Code's default | Model the Claude responder answers with |
+| `BUILDSPACE_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/bin` | Claude executable for the Claude responder |
 | `BUILDSPACE_TOKEN_FILE` | `~/.buildspace/token` | Where the server keeps its token (created mode 600 on first start) and where a client on the same machine reads it |
 
 ### Pairing
@@ -165,6 +170,32 @@ service. [SECURITY.md](SECURITY.md) has the full statement. In short:
 - The page loads highlight.js, marked, vis-network, mermaid and panzoom
   from public CDNs, pinned to exact versions. The service worker caches
   them after first load.
+
+## Comment threads
+
+The viewer can tap a note paragraph, table row, list item, diagram element
+or graph node and leave a comment. The **comments** / **notes** pill in the
+header hides them; that choice is remembered per entry in the browser.
+
+With a responder configured, the comment box gets an **ask** toggle. An
+asked comment opens a thread panel, the responder's answer lands there
+(the bubble shows *thinking…* until it does), and the viewer can follow up
+in the same thread. Agents read threads back with `get_annotations()`.
+
+`BUILDSPACE_RESPONDER=claude` answers with Claude Code, from inside the
+session that pushed the entry. The Python client records that session with
+every push (Claude Code sets `CLAUDE_CODE_SESSION_ID` for the commands it
+runs), and the responder runs `claude -p --resume <session> --fork-session`:
+a copy of the whole conversation answers, and the original is never written
+to. Follow-ups continue that copy. Entries pushed from outside a Claude Code
+session get a fresh session with the entry's content instead. The answering
+session is read-only: only Read, Grep and Glob exist in it, anything that
+would need approval is denied, and no MCP servers load. It runs as you,
+under your Claude Code login, so it uses your plan's usage like any other
+Claude Code session.
+
+Any other program can be a responder: it gets the job as JSON on stdin and
+prints `{"text": "..."}`. See `buildspace/responder.py` for the format.
 
 ## Driving it from Python
 
@@ -243,7 +274,9 @@ buildspace pair [--url URL]      # print a link that pairs a browser
 
 Everything the client does is a JSON POST. Any language can drive it.
 Send `Authorization: Bearer <token>` with every request; without it the
-server answers 401.
+server answers 401. An agent can add `X-Buildspace-Origin: {"session_id",
+"cwd", "transcript", "host", "agent"}` (JSON) to a push so a responder can
+answer comments on that entry from inside its session.
 
 | Method | Path | Body |
 |--------|------|------|
@@ -263,8 +296,11 @@ server answers 401.
 | POST | `/api/tab` | `{tab}` |
 | POST | `/api/autofollow` | `{value}` |
 | POST | `/api/clear` | Delete every entry |
-| POST | `/api/annotation` | `{entry_id, comment, block_index? (notes), line_index?, anchor? (uml/graph), block_preview?, kind?}` |
-| GET | `/api/annotations/{id}` | The reader's comments on a note or diagram |
+| POST | `/api/annotation` | `{entry_id, comment, block_index? (notes), line_index?, anchor? (uml/graph), block_preview?, kind?, ask?}` |
+| GET | `/api/annotations/{id}` | The reader's comments on a note or diagram, each with its thread in `messages` |
+| GET | `/api/annotation/{id}` | One comment with its thread |
+| POST | `/api/annotation/{id}/message` | `{text, ask?}` adds a follow-up; `ask` queues an answer |
+| GET | `/api/config` | `{responder, responder_name}` |
 | DELETE | `/api/annotation/{id}` | Remove one comment |
 | WS | `/ws` | Broadcast channel the page listens on. Closes with code 4401 when unauthenticated |
 | GET | `/pair` | Pairing page for browsers (no token needed) |
@@ -273,7 +309,8 @@ server answers 401.
 Every mutation is broadcast over the WebSocket as a typed message
 (`entry_added`, `entry_deleted`, `graph_patch`, `diagram_focus`, `tab`,
 `autofollow`, `cleared`, `note_annotation_added`,
-`note_annotation_deleted`) so every open browser updates at once.
+`note_annotation_deleted`, `annotation_thread`) so every open browser
+updates at once.
 
 ## Embedding images in notes
 
