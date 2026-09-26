@@ -171,8 +171,16 @@ def latest_of_kind(kind: str) -> dict | None:
 
 
 def delete_entry(entry_id: int) -> bool:
+    # SQLite doesn't enforce the foreign keys unless asked, so take the
+    # entry's comments and their threads with it explicitly.
     with _conn() as c:
         cur = c.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        c.execute(
+            "DELETE FROM annotation_messages WHERE annotation_id IN "
+            "(SELECT id FROM note_annotations WHERE entry_id = ?)",
+            (entry_id,),
+        )
+        c.execute("DELETE FROM note_annotations WHERE entry_id = ?", (entry_id,))
     return cur.rowcount > 0
 
 
